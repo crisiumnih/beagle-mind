@@ -1,5 +1,7 @@
 # BeagleMind
-<img src="beaglemind.webp" width="100" height="100" />
+<div style="text-align: center">
+<img src="beaglemind.webp" width="500" height="500" />
+</div>
 Chat with BeagleBoard docs using Qwen2.5-Instruct and RAG. Ask about BeagleBone, BeaglePlay, or anything in `docs.beagleboard.io`.
 
 ## Setup
