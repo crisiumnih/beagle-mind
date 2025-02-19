@@ -3,13 +3,14 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""A simple command-line interactive chat demo."""
+"""A BeagleBoard-powered command-line chat demo with RAG."""
 
 import argparse
 import os
 import platform
 import shutil
 from copy import deepcopy
+from embeddings import retrieve  # Import the retrieval function
 from threading import Thread
 
 import torch
@@ -19,41 +20,25 @@ from transformers.trainer_utils import set_seed
 DEFAULT_CKPT_PATH = "model"
 
 _WELCOME_MSG = """\
-Welcome to use Qwen2.5-Instruct model, type text to start chat, type :h to show command help.
-(欢迎使用 Qwen2.5-Instruct 模型，输入内容即可进行对话，:h 显示命令帮助。)
-
-Note: This demo is governed by the original license of Qwen2.5.
-We strongly advise users not to knowingly generate or allow others to knowingly generate harmful content, including hate speech, violence, pornography, deception, etc.
-(注：本演示受Qwen2.5的许可协议限制。我们强烈建议，用户不应传播及不应允许他人传播以下内容，包括但不限于仇恨言论、暴力、色情、欺诈相关的有害信息。)
+Welcome to the BeagleBoard Chat Demo! Type your question to dive into BeagleBoard docs, or :h for help.
+Powered by Qwen2.5-Instruct and BeagleBoard documentation via RAG.
 """
 _HELP_MSG = """\
 Commands:
-    :help / :h              Show this help message              显示帮助信息
-    :exit / :quit / :q      Exit the demo                       退出Demo
-    :clear / :cl            Clear screen                        清屏
-    :clear-history / :clh   Clear history                       清除对话历史
-    :history / :his         Show history                        显示对话历史
-    :seed                   Show current random seed            显示当前随机种子
-    :seed <N>               Set random seed to <N>              设置随机种子
-    :conf                   Show current generation config      显示生成配置
-    :conf <key>=<value>     Change generation config            修改生成配置
-    :reset-conf             Reset generation config             重置生成配置
+    :help / :h              Show this help message
+    :exit / :quit / :q      Exit the demo
+    :clear / :cl            Clear screen
+    :clear-history / :clh   Clear chat history
+    :history / :his         Show chat history
+    :seed                   Show current random seed
+    :seed <N>               Set random seed to <N>
+    :conf                   Show generation config
+    :conf <key>=<value>     Tweak generation config
+    :reset-conf             Reset generation config
 """
 _ALL_COMMAND_NAMES = [
-    "help",
-    "h",
-    "exit",
-    "quit",
-    "q",
-    "clear",
-    "cl",
-    "clear-history",
-    "clh",
-    "history",
-    "his",
-    "seed",
-    "conf",
-    "reset-conf",
+    "help", "h", "exit", "quit", "q", "clear", "cl",
+    "clear-history", "clh", "history", "his", "seed", "conf", "reset-conf"
 ]
 
 
@@ -67,98 +52,96 @@ def _setup_readline():
 
     def _completer(text, state):
         nonlocal _matches
-
         if state == 0:
-            _matches = [
-                cmd_name for cmd_name in _ALL_COMMAND_NAMES if cmd_name.startswith(text)
-            ]
-        if 0 <= state < len(_matches):
-            return _matches[state]
-        return None
+            _matches = [cmd for cmd in _ALL_COMMAND_NAMES if cmd.startswith(text)]
+        return _matches[state] if 0 <= state < len(_matches) else None
 
     readline.set_completer(_completer)
     readline.parse_and_bind("tab: complete")
 
 
 def _load_model_tokenizer(args):
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.checkpoint_path,
-        resume_download=True,
-    )
-
-    if args.cpu_only:
-        device_map = "cpu"
-    else:
-        device_map = "auto"
-
+    tokenizer = AutoTokenizer.from_pretrained(args.checkpoint_path, resume_download=True)
+    device_map = "cpu" if args.cpu_only else "auto"
     model = AutoModelForCausalLM.from_pretrained(
-        args.checkpoint_path,
-        torch_dtype="auto",
-        device_map=device_map,
-        resume_download=True,
+        args.checkpoint_path, torch_dtype="auto", device_map=device_map, resume_download=True
     ).eval()
-    model.generation_config.max_new_tokens = 2048  # For chat.
-
+    model.generation_config.max_new_tokens = 2048  # Plenty for BeagleBoard chats
+    model.generation_config.temperature = 0.6  # Keep it coherent, Beagle-style
     return model, tokenizer
 
 
 def _gc():
     import gc
-
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
 
 def _clear_screen():
-    if platform.system() == "Windows":
-        os.system("cls")
-    else:
-        os.system("clear")
+    os.system("cls" if platform.system() == "Windows" else "clear")
 
 
 def _print_history(history):
     terminal_width = shutil.get_terminal_size()[0]
-    print(f"History ({len(history)})".center(terminal_width, "="))
-    for index, (query, response) in enumerate(history):
-        print(f"User[{index}]: {query}")
-        print(f"Qwen[{index}]: {response}")
+    print(f"Chat History ({len(history)})".center(terminal_width, "="))
+    for i, (query, response) in enumerate(history):
+        print(f"You[{i}]: {query}")
+        print(f"BeagleBot[{i}]: {response}")
     print("=" * terminal_width)
 
 
 def _get_input() -> str:
     while True:
         try:
-            message = input("User> ").strip()
+            message = input("You> ").strip()
         except UnicodeDecodeError:
-            print("[ERROR] Encoding error in input")
+            print("[ERROR] Input encoding goofed up")
             continue
         except KeyboardInterrupt:
             exit(1)
         if message:
             return message
-        print("[ERROR] Query is empty")
+        print("[ERROR] Don’t leave me hanging—type something!")
 
 
 def _chat_stream(model, tokenizer, query, history):
+    # Grab BeagleBoard docs with RAG
+    retrieved_docs = retrieve(query, k=2)  # Adjust k for more/less context
+    if retrieved_docs:
+        context = "\n\n".join(
+            f"Source: {path}\nContent: {doc[:1000]}"  # Cap at 1000 chars per doc
+            for doc, path in retrieved_docs
+        )
+    else:
+        context = "No BeagleBoard docs found for that one."
+
+    # Build convo with history
     conversation = []
     for query_h, response_h in history:
         conversation.append({"role": "user", "content": query_h})
         conversation.append({"role": "assistant", "content": response_h})
-    conversation.append({"role": "user", "content": query})
+    
+    # Craft a BeagleBoard-flavored prompt
+    augmented_query = (
+        f"Using BeagleBoard docs as context:\n\n"
+        f"{context}\n\n"
+        f"Question: {query}\n\n"
+        f"Give me a solid answer based on the docs where it fits."
+    )
+    conversation.append({"role": "user", "content": augmented_query})
+
+    # Prep the model input
     input_text = tokenizer.apply_chat_template(
-        conversation,
-        add_generation_prompt=True,
-        tokenize=False,
+        conversation, add_generation_prompt=True, tokenize=False
     )
     inputs = tokenizer([input_text], return_tensors="pt").to(model.device)
+    
+    # Stream the response
     streamer = TextIteratorStreamer(
         tokenizer=tokenizer, skip_prompt=True, timeout=60.0, skip_special_tokens=True
     )
-    generation_kwargs = {
-        **inputs,
-        "streamer": streamer,
-    }
+    generation_kwargs = {**inputs, "streamer": streamer}
     thread = Thread(target=model.generate, kwargs=generation_kwargs)
     thread.start()
 
@@ -167,44 +150,30 @@ def _chat_stream(model, tokenizer, query, history):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Qwen2.5-Instruct command-line interactive chat demo."
-    )
+    parser = argparse.ArgumentParser(description="BeagleBoard Chat Demo with Qwen2.5-Instruct.")
     parser.add_argument(
-        "-c",
-        "--checkpoint-path",
-        type=str,
-        default=DEFAULT_CKPT_PATH,
-        help="Checkpoint name or path, default to %(default)r",
+        "-c", "--checkpoint-path", type=str, default=DEFAULT_CKPT_PATH,
+        help="Path to Qwen2.5 model (default: 'model')"
     )
     parser.add_argument("-s", "--seed", type=int, default=1234, help="Random seed")
-    parser.add_argument(
-        "--cpu-only", action="store_true", help="Run demo with CPU only"
-    )
+    parser.add_argument("--cpu-only", action="store_true", help="Run on CPU only")
     args = parser.parse_args()
 
     history, response = [], ""
-
     model, tokenizer = _load_model_tokenizer(args)
     orig_gen_config = deepcopy(model.generation_config)
 
     _setup_readline()
-
     _clear_screen()
     print(_WELCOME_MSG)
 
     seed = args.seed
-
     while True:
         query = _get_input()
 
-        # Process commands.
         if query.startswith(":"):
             command_words = query[1:].strip().split()
-            if not command_words:
-                command = ""
-            else:
-                command = command_words[0]
+            command = command_words[0] if command_words else ""
 
             if command in ["exit", "quit", "q"]:
                 break
@@ -214,7 +183,7 @@ def main():
                 _gc()
                 continue
             elif command in ["clear-history", "clh"]:
-                print(f"[INFO] All {len(history)} history cleared")
+                print(f"[INFO] Wiped {len(history)} chat entries")
                 history.clear()
                 _gc()
                 continue
@@ -224,60 +193,41 @@ def main():
             elif command in ["history", "his"]:
                 _print_history(history)
                 continue
-            elif command in ["seed"]:
+            elif command == "seed":
                 if len(command_words) == 1:
-                    print(f"[INFO] Current random seed: {seed}")
-                    continue
+                    print(f"[INFO] Current seed: {seed}")
                 else:
-                    new_seed_s = command_words[1]
                     try:
-                        new_seed = int(new_seed_s)
+                        seed = int(command_words[1])
+                        print(f"[INFO] Seed set to {seed}")
                     except ValueError:
-                        print(
-                            f"[WARNING] Fail to change random seed: {new_seed_s!r} is not a valid number"
-                        )
-                    else:
-                        print(f"[INFO] Random seed changed to {new_seed}")
-                        seed = new_seed
-                    continue
-            elif command in ["conf"]:
+                        print(f"[WARNING] {command_words[1]} ain’t a number, bro")
+                continue
+            elif command == "conf":
                 if len(command_words) == 1:
                     print(model.generation_config)
                 else:
-                    for key_value_pairs_str in command_words[1:]:
-                        eq_idx = key_value_pairs_str.find("=")
-                        if eq_idx == -1:
-                            print("[WARNING] format: <key>=<value>")
+                    for kv in command_words[1:]:
+                        if "=" not in kv:
+                            print("[WARNING] Use <key>=<value> format")
                             continue
-                        conf_key, conf_value_str = (
-                            key_value_pairs_str[:eq_idx],
-                            key_value_pairs_str[eq_idx + 1 :],
-                        )
+                        key, value = kv.split("=", 1)
                         try:
-                            conf_value = eval(conf_value_str)
+                            setattr(model.generation_config, key, eval(value))
+                            print(f"[INFO] Set {key} = {value}")
                         except Exception as e:
-                            print(e)
-                            continue
-                        else:
-                            print(
-                                f"[INFO] Change config: model.generation_config.{conf_key} = {conf_value}"
-                            )
-                            setattr(model.generation_config, conf_key, conf_value)
+                            print(f"[ERROR] {e}")
                 continue
-            elif command in ["reset-conf"]:
-                print("[INFO] Reset generation config")
+            elif command == "reset-conf":
                 model.generation_config = deepcopy(orig_gen_config)
+                print("[INFO] Config reset to default")
                 print(model.generation_config)
                 continue
-            else:
-                # As normal query.
-                pass
 
-        # Run chat.
         set_seed(seed)
         _clear_screen()
-        print(f"\nUser: {query}")
-        print(f"\nQwen: ", end="")
+        print(f"\nYou: {query}")
+        print(f"\nBeagleBot: ", end="")
         try:
             partial_text = ""
             for new_text in _chat_stream(model, tokenizer, query, history):
@@ -285,14 +235,11 @@ def main():
                 partial_text += new_text
             response = partial_text
             print()
-
+            history.append((query, response))
         except KeyboardInterrupt:
-            print("[WARNING] Generation interrupted")
+            print("[WARNING] Chat interrupted—hit me again!")
             continue
-
-        history.append((query, response))
 
 
 if __name__ == "__main__":
     main()
-

@@ -12,3 +12,6 @@ wheels/
 
 docs.beagleboard.io/
 model/
+__pycache__/
+Qwen2.5-1.5B-Instruct/
+
